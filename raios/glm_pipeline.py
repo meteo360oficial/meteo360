@@ -1,22 +1,21 @@
-glm_pipeline.py raios/glm_pipeline.py · 244 linhas
 #!/usr/bin/env python3
 """
 Pipeline de relâmpagos GLM (GOES-East, NOAA) -> data/raios.json
- 
+
 Roda no GitHub Actions a cada 5 minutos. Baixa os arquivos GLM L2 LCFA
 (flashes de relâmpago) dos últimos WINDOW_MIN minutos no bucket público
 da NOAA (S3, acesso anônimo), filtra para uma caixa que cobre o Brasil
 e os vizinhos, e grava um JSON pequeno que o site consome.
- 
+
 Dependências: python 3.9+, numpy, netCDF4 (pip install numpy netCDF4).
 Não usa boto3: a listagem do bucket público é feita por HTTP.
- 
+
 Variáveis: a caixa e o bucket podem ser trocados por variáveis de ambiente.
 Campos do NetCDF usados (confirmar na primeira execução real, ver README):
   flash_lat, flash_lon, flash_energy, flash_quality_flag,
   flash_time_offset_of_first_event (opcional)
 """
- 
+
 import json
 import os
 import re
@@ -24,7 +23,7 @@ import sys
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
- 
+
 # ---------- configuração ----------
 BUCKET = os.environ.get("GLM_BUCKET", "noaa-goes19")   # GOES-19 = GOES-East (desde 2025)
 PRODUCT = "GLM-L2-LCFA"
@@ -35,12 +34,12 @@ MAX_FLASHES = 150000
 HIST_MIN = int(os.environ.get("GLM_HIST_MIN", "60"))  # histórico mantido no JSON (para voltar no tempo)
 OUT_PATH = os.environ.get("RAIOS_OUT", "data/raios.json")
 UA = "meteo360-raios-pipeline/1.0"
- 
+
 FNAME_RE = re.compile(r"_s(\d{4})(\d{3})(\d{2})(\d{2})(\d{2})(\d)")
- 
- 
+
+
 # ---------- lógica pura (testável sem rede) ----------
- 
+
 def parse_start_time(filename):
     """Extrai o início da varredura do nome do arquivo GLM (UTC, datetime aware)."""
     m = FNAME_RE.search(filename)
@@ -49,8 +48,8 @@ def parse_start_time(filename):
     year, doy, hh, mm, ss, tenth = (int(x) for x in m.groups())
     base = datetime(year, 1, 1, tzinfo=timezone.utc) + timedelta(days=doy - 1)
     return base.replace(hour=hh, minute=mm, second=ss) + timedelta(milliseconds=tenth * 100)
- 
- 
+
+
 def hours_in_window(now, window_min):
     """Lista as horas UTC (datetime) que cobrem a janela [now-window, now]."""
     start = now - timedelta(minutes=window_min)
@@ -60,8 +59,8 @@ def hours_in_window(now, window_min):
         out.append(cur)
         cur += timedelta(hours=1)
     return out
- 
- 
+
+
 def keep_file_times(names_with_times, window_start, window_end):
     """Mantém só os arquivos cujo início cai na janela (com 1 varredura de folga)."""
     slack = timedelta(minutes=1)
@@ -69,8 +68,8 @@ def keep_file_times(names_with_times, window_start, window_end):
         (n, t) for n, t in names_with_times
         if t is not None and window_start - slack <= t <= window_end
     ]
- 
- 
+
+
 def filter_flashes(lat, lon, energy, qflag, bbox):
     """Máscara booleana: dentro da caixa e com qualidade boa (flag 0, se existir)."""
     import numpy as np
@@ -84,8 +83,8 @@ def filter_flashes(lat, lon, energy, qflag, bbox):
     if qflag is not None:
         m &= np.asarray(qflag) == 0
     return m
- 
- 
+
+
 def merge_history(old_flashes, new_flashes, now, hist_min):
     """Junta o histórico antigo com os novos, tira duplicados e descarta o que passou de hist_min."""
     cutoff = now.timestamp() - hist_min * 60
@@ -99,8 +98,8 @@ def merge_history(old_flashes, new_flashes, now, hist_min):
         seen.add(key)
         out.append(f)
     return out
- 
- 
+
+
 def load_previous(path):
     """Lê o JSON anterior (do checkout do repositório), se existir e for válido."""
     try:
@@ -108,8 +107,8 @@ def load_previous(path):
             return json.load(fh).get("flashes", [])
     except Exception:
         return []
- 
- 
+
+
 def build_payload(flashes, now, window_min, bbox, files_used, errors):
     """Monta o JSON final. flashes = lista de [lat, lon, t_epoch_s, energia]."""
     flashes = sorted(flashes, key=lambda f: f[2])
@@ -131,16 +130,16 @@ def build_payload(flashes, now, window_min, bbox, files_used, errors):
             for f in flashes
         ],
     }
- 
- 
+
+
 # ---------- rede e leitura ----------
- 
+
 def http_get(url, timeout=60):
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read()
- 
- 
+
+
 def list_prefix(prefix):
     """Lista chaves de um prefixo no bucket público (S3 ListObjectsV2, paginado)."""
     keys, token = [], None
@@ -158,8 +157,8 @@ def list_prefix(prefix):
             break
         token = root.find(f"{ns}NextContinuationToken").text
     return keys
- 
- 
+
+
 def find_files(now, window_min):
     start = now - timedelta(minutes=window_min)
     cands = []
@@ -170,8 +169,8 @@ def find_files(now, window_min):
             cands.append((key, parse_start_time(name)))
     keep = keep_file_times(cands, start, now)
     return sorted(keep, key=lambda kt: kt[1])
- 
- 
+
+
 def read_granule(path):
     """Lê um arquivo LCFA. Retorna (lat, lon, t_epoch, energy, qflag)."""
     import netCDF4
@@ -188,22 +187,22 @@ def read_granule(path):
         else:
             off = np.zeros(len(lat))
         return lat, lon, energy, qflag, off
- 
- 
+
+
 def main():
     now = datetime.now(timezone.utc).replace(microsecond=0)
     start = now - timedelta(minutes=WINDOW_MIN)
     errors, used, flashes = [], [], []
- 
+
     try:
         files = find_files(now, WINDOW_MIN)
     except Exception as e:  # rede caiu: mantém o último JSON bom
         print(f"ERRO listando bucket: {e}", file=sys.stderr)
         return 1
- 
+
     if not files:
         errors.append("nenhum arquivo GLM na janela")
- 
+
     for key, t0 in files:
         local = os.path.join("/tmp", key.rsplit("/", 1)[-1])
         try:
@@ -223,12 +222,12 @@ def main():
         finally:
             if os.path.exists(local):
                 os.remove(local)
- 
+
     # se nada foi lido por erro (não por falta de raios), não sobrescreve o último bom
     if files and not used:
         print("Nenhum arquivo lido; mantendo o JSON anterior.", file=sys.stderr)
         return 1
- 
+
     previous = load_previous(OUT_PATH)
     # o JSON anterior vem como [lat, lon, t, energia]; o novo também
     merged = merge_history(previous, flashes, now, HIST_MIN)
@@ -238,8 +237,8 @@ def main():
         json.dump(payload, fh, ensure_ascii=False, separators=(",", ":"))
     print(f"OK: {payload['count']} raios em {len(used)} arquivo(s) -> {OUT_PATH}")
     return 0
- 
- 
+
+
 if __name__ == "__main__":
     sys.exit(main())
  
