@@ -64,7 +64,7 @@ def keep_file_times(names_with_times, window_start, window_end):
     """Mantém só os arquivos cujo início cai na janela (com 1 varredura de folga)."""
     slack = timedelta(minutes=1)
     return [
-        n for n, t in names_with_times
+        (n, t) for n, t in names_with_times
         if t is not None and window_start - slack <= t <= window_end
     ]
 
@@ -213,3 +213,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+                             
